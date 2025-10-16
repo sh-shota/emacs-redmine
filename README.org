@@ -6,8 +6,9 @@
 
 * 導入方法
 以下を .emacs に記述。
-- (require 'redmine)
-- (setq redmine-host "https://rm.lsnl.jp")
-- (setq redmine-api-key "your api key")
-
+```
+(require 'redmine)
+(setq redmine-host "https://rm.lsnl.jp")
+(setq redmine-api-key "your api key")
+```
 redmine.el を ~/lib/emacs に置く。(または、load-file する場所に置く。)
