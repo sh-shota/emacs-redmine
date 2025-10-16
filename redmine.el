@@ -1,4 +1,4 @@
-;;; redmine.el --- Interactive Redmine issue manager
+;;; redmine.el --- Interactive Redmine issue manager  -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2025
 
@@ -42,7 +42,12 @@
   :type 'integer
   :group 'redmine)
 
-(defcustom redmine-news-limit 50
+(defcustom redmine-done-status-id 3
+  "Status ID for DONE state."
+  :type 'integer
+  :group 'redmine)
+
+(defcustom redmine-news-limit 100
   "Maximum number of news items to fetch."
   :type 'integer
   :group 'redmine)
@@ -162,6 +167,218 @@
                   (t '(:foreground "dark slate gray")))))
       (propertize formatted 'face face))))
 
+;;; Multiline text input (for comments)
+
+(defun redmine/read-multiline-text (prompt callback)
+  "Read multiline text in a dedicated buffer with PROMPT and CALLBACK."
+  (let ((buffer (get-buffer-create "*Redmine Text Input*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (text-mode)
+      (setq header-line-format
+            (propertize "C-c C-c: Finish  C-c C-k: Cancel"
+                       'face '(:background "dark slate gray" :foreground "white")))
+      
+      ;; Insert header with read-only protection
+      (let ((start (point)))
+        (insert prompt "\n")
+        (insert (make-string 70 ?-) "\n\n")
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t face bold)))
+      
+      ;; Set up key bindings
+      (local-set-key (kbd "C-c C-c")
+                     (lambda ()
+                       (interactive)
+                       (let* ((header-end (save-excursion
+                                           (goto-char (point-min))
+                                           (forward-line 2)
+                                           (point)))
+                              (text (buffer-substring-no-properties header-end (point-max))))
+                         (kill-buffer)
+                         (when callback
+                           (funcall callback text)))))
+      (local-set-key (kbd "C-c C-k")
+                     (lambda ()
+                       (interactive)
+                       (when (yes-or-no-p "Cancel input? ")
+                         (kill-buffer)
+                         (message "Cancelled")))))
+    (switch-to-buffer buffer)
+    (goto-char (point-max))))
+
+;;; Form input (for news and issues)
+
+(defun redmine/read-news-form (project callback)
+  "Read news form in a dedicated buffer with PROJECT and CALLBACK."
+  (let ((buffer (get-buffer-create "*Redmine News Form*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (text-mode)
+      (setq header-line-format
+            (propertize "C-c C-c: Submit  C-c C-k: Cancel"
+                       'face '(:background "dark slate gray" :foreground "white")))
+      
+      ;; Insert form template with read-only labels
+      (let ((start (point)))
+        (insert (propertize "News for project: " 'face 'bold) project "\n")
+        (insert (make-string 70 ?=) "\n\n")
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      
+      ;; Title field
+      (let ((start (point)))
+        (insert (propertize "Title:\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n\n")
+      
+      ;; Summary field
+      (let ((start (point)))
+        (insert (propertize "Summary (optional):\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n\n")
+      
+      ;; Description field
+      (let ((start (point)))
+        (insert (propertize "Description:\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n")
+      
+      ;; Set up key bindings
+      (local-set-key (kbd "C-c C-c")
+                     (lambda ()
+                       (interactive)
+                       (let* ((title-start (save-excursion
+                                            (goto-char (point-min))
+                                            (search-forward "Title:\n" nil t)))
+                              (summary-start (save-excursion
+                                              (goto-char (point-min))
+                                              (search-forward "Summary (optional):\n" nil t)))
+                              (description-start (save-excursion
+                                                  (goto-char (point-min))
+                                                  (search-forward "Description:\n" nil t)))
+                              (title (when title-start
+                                      (string-trim
+                                       (buffer-substring-no-properties
+                                        title-start
+                                        (save-excursion
+                                          (goto-char title-start)
+                                          (search-forward "Summary (optional):\n" nil t)
+                                          (line-beginning-position))))))
+                              (summary (when summary-start
+                                        (string-trim
+                                         (buffer-substring-no-properties
+                                          summary-start
+                                          (save-excursion
+                                            (goto-char summary-start)
+                                            (search-forward "Description:\n" nil t)
+                                            (line-beginning-position))))))
+                              (description (when description-start
+                                            (string-trim
+                                             (buffer-substring-no-properties
+                                              description-start
+                                              (point-max))))))
+                         (if (or (not title) (= (length title) 0))
+                             (message "Title cannot be empty!")
+                           (kill-buffer)
+                           (when callback
+                             (funcall callback title summary description))))))
+      (local-set-key (kbd "C-c C-k")
+                     (lambda ()
+                       (interactive)
+                       (when (yes-or-no-p "Cancel? ")
+                         (kill-buffer)
+                         (message "Cancelled")))))
+    (switch-to-buffer buffer)
+    (goto-char (point-min))
+    (search-forward "Title:\n" nil t)))
+
+(defun redmine/read-issue-form (project-name tracker-name callback)
+  "Read issue form in a dedicated buffer with PROJECT-NAME, TRACKER-NAME and CALLBACK."
+  (let ((buffer (get-buffer-create "*Redmine Issue Form*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (text-mode)
+      (setq header-line-format
+            (propertize "C-c C-c: Submit  C-c C-k: Cancel"
+                       'face '(:background "dark slate gray" :foreground "white")))
+      
+      ;; Insert form template
+      (let ((start (point)))
+        (insert (propertize "New Issue\n" 'face '(:height 1.3 :weight bold)))
+        (insert (propertize "Project: " 'face 'bold) project-name "\n")
+        (insert (propertize "Tracker: " 'face 'bold) tracker-name "\n")
+        (insert (make-string 70 ?=) "\n\n")
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      
+      ;; Subject field
+      (let ((start (point)))
+        (insert (propertize "Subject:\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n\n")
+      
+      ;; Due date field
+      (let ((start (point)))
+        (insert (propertize "Due Date (YYYY-MM-DD, optional):\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n\n")
+      
+      ;; Description field
+      (let ((start (point)))
+        (insert (propertize "Description:\n" 'face '(:weight bold :underline t)))
+        (add-text-properties start (point) '(read-only t front-sticky t rear-nonsticky t)))
+      (insert "\n")
+      
+      ;; Set up key bindings
+      (local-set-key (kbd "C-c C-c")
+                     (lambda ()
+                       (interactive)
+                       (let* ((subject-start (save-excursion
+                                              (goto-char (point-min))
+                                              (search-forward "Subject:\n" nil t)))
+                              (due-date-start (save-excursion
+                                               (goto-char (point-min))
+                                               (search-forward "Due Date (YYYY-MM-DD, optional):\n" nil t)))
+                              (description-start (save-excursion
+                                                  (goto-char (point-min))
+                                                  (search-forward "Description:\n" nil t)))
+                              (subject (when subject-start
+                                        (string-trim
+                                         (buffer-substring-no-properties
+                                          subject-start
+                                          (save-excursion
+                                            (goto-char subject-start)
+                                            (search-forward "Due Date (YYYY-MM-DD, optional):\n" nil t)
+                                            (line-beginning-position))))))
+                              (due-date (when due-date-start
+                                         (string-trim
+                                          (buffer-substring-no-properties
+                                           due-date-start
+                                           (save-excursion
+                                             (goto-char due-date-start)
+                                             (search-forward "Description:\n" nil t)
+                                             (line-beginning-position))))))
+                              (description (when description-start
+                                            (string-trim
+                                             (buffer-substring-no-properties
+                                              description-start
+                                              (point-max))))))
+                         (if (or (not subject) (= (length subject) 0))
+                             (message "Subject cannot be empty!")
+                           (kill-buffer)
+                           (when callback
+                             (funcall callback subject due-date description))))))
+      (local-set-key (kbd "C-c C-k")
+                     (lambda ()
+                       (interactive)
+                       (when (yes-or-no-p "Cancel? ")
+                         (kill-buffer)
+                         (message "Cancelled")))))
+    (switch-to-buffer buffer)
+    (goto-char (point-min))
+    (search-forward "Subject:\n" nil t)))
+
 ;;; Issue list mode
 
 (defvar redmine-list-mode-map
@@ -191,7 +408,6 @@
   (setq tabulated-list-sort-key (cons "Due Date" nil))
   (tabulated-list-init-header))
 
-;; Hide from M-x completion
 (put 'redmine-list-mode 'completion-predicate (lambda (_ _) nil))
 
 (defun redmine/fetch-issues ()
@@ -220,7 +436,6 @@
          (priority (elmine/get issue :priority :name))
          (due-date (plist-get issue :due_date))
          (due-display (redmine/format-due-date due-date))
-         ;; For sorting, use days as number (9999 if no due date)
          (due-sort (if due-date
                       (or (redmine/days-until due-date) 9999)
                     9999)))
@@ -278,70 +493,44 @@
 
 ;;; New issue creation
 
-(defvar redmine-multiline-text nil
-  "Temporary storage for multiline text input.")
-
-(defvar redmine-multiline-callback nil
-  "Callback function for multiline text input.")
-
-(defun redmine/read-multiline-text (prompt callback)
-  "Read multiline text in a dedicated buffer with PROMPT and CALLBACK."
-  (setq redmine-multiline-callback callback)
-  (let ((buffer (get-buffer-create "*Redmine Text Input*")))
-    (with-current-buffer buffer
-      (erase-buffer)
-      (text-mode)
-      (insert (propertize prompt 'face 'bold 'read-only t))
-      (insert "\n")
-      (insert (propertize (make-string 70 ?-) 'face 'bold 'read-only t))
-      (insert "\n\n")
-      (setq header-line-format
-            (propertize "C-c C-c: Finish  C-c C-k: Cancel"
-                       'face '(:background "dark slate gray" :foreground "white")))
-      (local-set-key (kbd "C-c C-c")
-                     (lambda ()
-                       (interactive)
-                       (let ((text (buffer-substring-no-properties
-                                   (save-excursion
-                                     (goto-char (point-min))
-                                     (forward-line 3)
-                                     (point))
-                                   (point-max))))
-                         (kill-buffer)
-                         (when redmine-multiline-callback
-                           (funcall redmine-multiline-callback text)))))
-      (local-set-key (kbd "C-c C-k")
-                     (lambda ()
-                       (interactive)
-                       (when (yes-or-no-p "Cancel input? ")
-                         (kill-buffer)
-                         (message "Cancelled")))))
-    (switch-to-buffer buffer)
-    (goto-char (point-max))))
+(defun redmine/new-issue ()
+  "Create a new issue."
   (let* ((project (redmine/complete-project))
          (tracker (redmine/complete-tracker))
-         (subject (read-string "Subject: "))
-         (description (read-string "Description: "))
-         (due-date (read-string "Due date (YYYY-MM-DD, optional): ")))
-    (when (and subject (> (length subject) 0))
-      (let ((elmine/host redmine-host)
-            (elmine/api-key redmine-api-key)
-            (issue-data `(:project_id ,project
-                         :tracker_id ,tracker
-                         :subject ,subject
-                         :description ,description)))
-        (when (and due-date (> (length due-date) 0))
-          (setq issue-data (plist-put issue-data :due_date due-date)))
-        (condition-case err
-            (progn
-              (elmine/create-issue issue-data)
-              (message "Issue created successfully")
-              (sit-for 0.5)
-              (when (get-buffer "*Redmine Issues*")
-                (with-current-buffer "*Redmine Issues*"
-                  (redmine/refresh-list))))
-          (error
-           (message "Error creating issue: %s" (error-message-string err))))))))
+         (projects (redmine/fetch-projects))
+         (trackers (redmine/fetch-trackers))
+         (project-name (plist-get
+                       (cl-find-if (lambda (p)
+                                     (string= (plist-get p :identifier) project))
+                                   projects)
+                       :name))
+         (tracker-name (plist-get
+                       (cl-find-if (lambda (tr)
+                                     (= (plist-get tr :id) tracker))
+                                   trackers)
+                       :name)))
+    (redmine/read-issue-form
+     project-name
+     tracker-name
+     (lambda (subject due-date description)
+       (let ((elmine/host redmine-host)
+             (elmine/api-key redmine-api-key)
+             (issue-data `(:project_id ,project
+                          :tracker_id ,tracker
+                          :subject ,subject
+                          :description ,description)))
+         (when (and due-date (> (length due-date) 0))
+           (setq issue-data (plist-put issue-data :due_date due-date)))
+         (condition-case err
+             (progn
+               (elmine/create-issue issue-data)
+               (message "Issue created successfully")
+               (sit-for 0.5)
+               (when (get-buffer "*Redmine Issues*")
+                 (with-current-buffer "*Redmine Issues*"
+                   (redmine/refresh-list))))
+           (error
+            (message "Error creating issue: %s" (error-message-string err)))))))))
 
 ;;; Search functionality
 
@@ -397,7 +586,6 @@
 (define-derived-mode redmine-detail-mode text-mode "Redmine-Detail"
   "Major mode for editing Redmine issue details (internal use only).")
 
-;; Hide from M-x completion
 (put 'redmine-detail-mode 'completion-predicate (lambda (_ _) nil))
 
 (defun redmine/open-issue ()
@@ -410,7 +598,6 @@
         (condition-case err
             (let* ((elmine/host redmine-host)
                    (elmine/api-key redmine-api-key)
-                   ;; Include journals (comments) in the response
                    (full-issue (elmine/get-issue id :include "journals")))
               (when full-issue
                 (setq redmine-current-issue full-issue)
@@ -466,7 +653,6 @@
         (insert (propertize (make-string 70 ?=) 'face 'bold))
         (insert "\n\n")
         
-        ;; Comments section
         (when journals
           (insert (propertize "Comments:\n" 'face '(:height 1.2 :weight bold)))
           (insert (propertize (make-string 70 ?-) 'face 'bold))
@@ -573,7 +759,6 @@
                (message "Adding comment to issue #%d..." id)
                (redmine/update-issue-safe `(:id ,id :notes ,comment))
                (message "Comment added to issue #%d" id)
-               ;; Reload issue detail if it's open
                (when (and (get-buffer "*Redmine Issue Detail*")
                           redmine-current-issue
                           (= (plist-get redmine-current-issue :id) id))
@@ -608,7 +793,6 @@
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header))
 
-;; Hide from M-x completion
 (put 'redmine-news-mode 'completion-predicate (lambda (_ _) nil))
 
 (defun redmine/fetch-news ()
@@ -668,34 +852,40 @@
 (defun redmine/new-news ()
   "Create a new news item."
   (let* ((project (redmine/complete-project))
-         (title (read-string "Title: "))
-         (summary (read-string "Summary: ")))
-    (when (and title (> (length title) 0))
-      (redmine/read-multiline-text
-       "Description (C-c C-c to finish, C-c C-k to cancel):"
-       (lambda (description)
-         (let ((elmine/host redmine-host)
-               (elmine/api-key redmine-api-key)
-               (news-data `(:title ,title
-                           :summary ,summary
-                           :description ,description))
-               (path (format "/projects/%s/news.json" project)))
-           (condition-case err
-               (progn
-                 ;; Use raw API call to handle empty response
-                 (let* ((data (elmine/api-encode `(:news ,news-data)))
-                        (response (elmine/api-raw "POST" path data nil))
-                        (status (elmine/get response :status :code)))
-                   (if (or (eq status 200) (eq status 201) (eq status 204))
-                       (progn
-                         (message "News created successfully")
-                         (sit-for 0.5)
-                         (when (get-buffer "*Redmine News*")
-                           (with-current-buffer "*Redmine News*"
-                             (redmine/refresh-news))))
-                     (error "Failed to create news: HTTP status %d" status))))
-             (error
-              (message "Error creating news: %s" (error-message-string err)))))))))))
+         (projects (redmine/fetch-projects))
+         (project-name (plist-get
+                       (cl-find-if (lambda (p)
+                                     (string= (plist-get p :identifier) project))
+                                   projects)
+                       :name)))
+    (redmine/read-news-form
+     project-name
+     (lambda (title summary description)
+       (let ((elmine/host redmine-host)
+             (elmine/api-key redmine-api-key)
+             (news-data `(:title ,title
+                         :description ,description))
+             (path (format "/projects/%s/news.json" project)))
+         (when (and summary (> (length summary) 0))
+           (setq news-data (plist-put news-data :summary summary)))
+         (condition-case err
+             (progn
+               (let* ((data (elmine/api-encode `(:news ,news-data)))
+                      (response (elmine/api-raw "POST" path data nil))
+                      (status (elmine/get response :status :code))
+                      (body (plist-get response :body)))
+                 (if (or (eq status 200) (eq status 201) (eq status 204))
+                     (progn
+                       (message "News created successfully")
+                       (sit-for 0.5)
+                       (when (get-buffer "*Redmine News*")
+                         (with-current-buffer "*Redmine News*"
+                           (redmine/refresh-news))))
+                   (progn
+                     (message "Failed to create news: HTTP %d - %s" status body)
+                     (error "Failed to create news: HTTP status %d" status)))))
+           (error
+            (message "Error creating news: %s" (error-message-string err)))))))))
 
 (defun redmine/search-news ()
   "Search news items."
