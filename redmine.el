@@ -96,6 +96,8 @@
 
 (defun redmine/fetch-projects ()
   "Fetch and cache projects."
+  (unless (and redmine-host redmine-api-key)
+    (error "Please set redmine-host and redmine-api-key first"))
   (unless redmine-projects
     (let ((elmine/host redmine-host)
           (elmine/api-key redmine-api-key))
@@ -104,6 +106,8 @@
 
 (defun redmine/fetch-trackers ()
   "Fetch and cache trackers."
+  (unless (and redmine-host redmine-api-key)
+    (error "Please set redmine-host and redmine-api-key first"))
   (unless redmine-trackers
     (let ((elmine/host redmine-host)
           (elmine/api-key redmine-api-key))
@@ -274,8 +278,46 @@
 
 ;;; New issue creation
 
-(defun redmine/new-issue ()
-  "Create a new issue."
+(defvar redmine-multiline-text nil
+  "Temporary storage for multiline text input.")
+
+(defvar redmine-multiline-callback nil
+  "Callback function for multiline text input.")
+
+(defun redmine/read-multiline-text (prompt callback)
+  "Read multiline text in a dedicated buffer with PROMPT and CALLBACK."
+  (setq redmine-multiline-callback callback)
+  (let ((buffer (get-buffer-create "*Redmine Text Input*")))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (text-mode)
+      (insert (propertize prompt 'face 'bold 'read-only t))
+      (insert "\n")
+      (insert (propertize (make-string 70 ?-) 'face 'bold 'read-only t))
+      (insert "\n\n")
+      (setq header-line-format
+            (propertize "C-c C-c: Finish  C-c C-k: Cancel"
+                       'face '(:background "dark slate gray" :foreground "white")))
+      (local-set-key (kbd "C-c C-c")
+                     (lambda ()
+                       (interactive)
+                       (let ((text (buffer-substring-no-properties
+                                   (save-excursion
+                                     (goto-char (point-min))
+                                     (forward-line 3)
+                                     (point))
+                                   (point-max))))
+                         (kill-buffer)
+                         (when redmine-multiline-callback
+                           (funcall redmine-multiline-callback text)))))
+      (local-set-key (kbd "C-c C-k")
+                     (lambda ()
+                       (interactive)
+                       (when (yes-or-no-p "Cancel input? ")
+                         (kill-buffer)
+                         (message "Cancelled")))))
+    (switch-to-buffer buffer)
+    (goto-char (point-max))))
   (let* ((project (redmine/complete-project))
          (tracker (redmine/complete-tracker))
          (subject (read-string "Subject: "))
@@ -521,25 +563,28 @@
 
 (defun redmine/add-comment-to-issue (issue)
   "Add comment to ISSUE (internal helper)."
-  (condition-case err
-      (let* ((id (plist-get issue :id))
-             (comment (read-string (format "Comment for issue #%d: " id))))
-        (when (and comment (> (length comment) 0))
-          (message "Adding comment to issue #%d..." id)
-          (redmine/update-issue-safe `(:id ,id :notes ,comment))
-          (message "Comment added to issue #%d" id)
-          ;; Reload issue detail if it's open
-          (when (and (get-buffer "*Redmine Issue Detail*")
-                     redmine-current-issue
-                     (= (plist-get redmine-current-issue :id) id))
-            (let* ((elmine/host redmine-host)
-                   (elmine/api-key redmine-api-key)
-                   (full-issue (elmine/get-issue id :include "journals")))
-              (when full-issue
-                (setq redmine-current-issue full-issue)
-                (redmine/show-issue-detail full-issue))))))
-    (error
-     (message "Error adding comment: %s" (error-message-string err)))))
+  (let ((id (plist-get issue :id)))
+    (redmine/read-multiline-text
+     (format "Comment for issue #%d (C-c C-c to finish, C-c C-k to cancel):" id)
+     (lambda (comment)
+       (when (and comment (> (length (string-trim comment)) 0))
+         (condition-case err
+             (progn
+               (message "Adding comment to issue #%d..." id)
+               (redmine/update-issue-safe `(:id ,id :notes ,comment))
+               (message "Comment added to issue #%d" id)
+               ;; Reload issue detail if it's open
+               (when (and (get-buffer "*Redmine Issue Detail*")
+                          redmine-current-issue
+                          (= (plist-get redmine-current-issue :id) id))
+                 (let* ((elmine/host redmine-host)
+                        (elmine/api-key redmine-api-key)
+                        (full-issue (elmine/get-issue id :include "journals")))
+                   (when full-issue
+                     (setq redmine-current-issue full-issue)
+                     (redmine/show-issue-detail full-issue)))))
+           (error
+            (message "Error adding comment: %s" (error-message-string err)))))))))
 
 ;;; News functionality
 
@@ -624,31 +669,33 @@
   "Create a new news item."
   (let* ((project (redmine/complete-project))
          (title (read-string "Title: "))
-         (summary (read-string "Summary: "))
-         (description (read-string "Description: ")))
+         (summary (read-string "Summary: ")))
     (when (and title (> (length title) 0))
-      (let ((elmine/host redmine-host)
-            (elmine/api-key redmine-api-key)
-            (news-data `(:title ,title
-                        :summary ,summary
-                        :description ,description))
-            (path (format "/projects/%s/news.json" project)))
-        (condition-case err
-            (progn
-              ;; Use raw API call to handle empty response
-              (let* ((data (elmine/api-encode `(:news ,news-data)))
-                     (response (elmine/api-raw "POST" path data nil))
-                     (status (elmine/get response :status :code)))
-                (if (or (eq status 200) (eq status 201) (eq status 204))
-                    (progn
-                      (message "News created successfully")
-                      (sit-for 0.5)
-                      (when (get-buffer "*Redmine News*")
-                        (with-current-buffer "*Redmine News*"
-                          (redmine/refresh-news))))
-                  (error "Failed to create news: HTTP status %d" status))))
-          (error
-           (message "Error creating news: %s" (error-message-string err))))))))
+      (redmine/read-multiline-text
+       "Description (C-c C-c to finish, C-c C-k to cancel):"
+       (lambda (description)
+         (let ((elmine/host redmine-host)
+               (elmine/api-key redmine-api-key)
+               (news-data `(:title ,title
+                           :summary ,summary
+                           :description ,description))
+               (path (format "/projects/%s/news.json" project)))
+           (condition-case err
+               (progn
+                 ;; Use raw API call to handle empty response
+                 (let* ((data (elmine/api-encode `(:news ,news-data)))
+                        (response (elmine/api-raw "POST" path data nil))
+                        (status (elmine/get response :status :code)))
+                   (if (or (eq status 200) (eq status 201) (eq status 204))
+                       (progn
+                         (message "News created successfully")
+                         (sit-for 0.5)
+                         (when (get-buffer "*Redmine News*")
+                           (with-current-buffer "*Redmine News*"
+                             (redmine/refresh-news))))
+                     (error "Failed to create news: HTTP status %d" status))))
+             (error
+              (message "Error creating news: %s" (error-message-string err)))))))))))
 
 (defun redmine/search-news ()
   "Search news items."
