@@ -1,0 +1,10 @@
+* emacs から redmine を操作する elisp
+
+* usage
+- M-x redmine/show-my-issues
+- M-x redmine/show-news
+
+* 導入方法
+- (require 'redmine)
+- (setq redmine-host "https://rm.lsnl.jp")
+- (setq redmine-api-key "your api key")
