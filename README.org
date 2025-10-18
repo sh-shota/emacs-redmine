@@ -13,4 +13,48 @@
 (setq redmine-api-key "your api key")
 #+END_SRC
 
+日本語での出力を可能にするパッチを elmine.el に導入。
+#+BEGIN_SRC emacs-lisp
+(defun elmine/api-raw (method path data params)
+  "Perform a raw HTTP request with given METHOD, a relative PATH and a
+plist of PARAMS for the query."
+  (let* ((redmine-host (if (boundp 'redmine-host)
+                           redmine-host
+                         elmine/host))
+         (redmine-api-key (if (boundp 'redmine-api-key)
+                              redmine-api-key
+                            elmine/api-key))
+         (url (elmine/api-build-url path params))
+         (url-request-method method)
+         (url-request-extra-headers
+          `(("Content-Type" . "application/json; charset=utf-8")
+            ("X-Redmine-API-Key" . ,redmine-api-key)))
+         (url-request-data data)
+         header-end status header body)
+    (save-excursion
+      (with-current-buffer (url-retrieve-synchronously url)
+        (goto-char (point-min))
+        (setq header-end (save-excursion
+                           (if (re-search-forward "^$" nil t)
+                               (progn
+                                 (forward-char)
+                                 (point))
+                             (point-max))))
+        (when (re-search-forward "^HTTP/\\(1\\.0\\|1\\.1\\) \\([0-9]+\\) \\([A-Za-z ]+\\)$" nil t)
+          (setq status (plist-put status :code (string-to-number (match-string 2))))
+          (setq status (plist-put status :text (match-string 3))))
+        (while (re-search-forward "^\\([^:]+\\): \\(.*\\)" header-end t)
+          (setq header (cons (match-string 1) (cons (match-string 2) header))))
+        (setq body (decode-coding-string
+                    (buffer-substring-no-properties header-end (point-max))
+                    'utf-8))
+        (kill-buffer)))
+    `(:status ,status
+      :header ,header
+      :body ,body)))
+#+END_SRC
+
+
 redmine.el を ~/lib/emacs に置く。(または、load-file する場所に置く。)
+
+
